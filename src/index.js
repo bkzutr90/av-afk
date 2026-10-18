@@ -28,6 +28,8 @@ async function registerCommands(clientId) {
     const rest = new REST({ version: '10' }).setToken(cfg.token);
     const route = cfg.guildId ? Routes.applicationGuildCommands(clientId, cfg.guildId) : Routes.applicationCommands(clientId);
     await rest.put(route, { body });
+    // Kalau pakai command per-server, hapus command global lama supaya tidak muncul dobel.
+    if (cfg.guildId) await rest.put(Routes.applicationCommands(clientId), { body: [] }).catch((err) => console.warn('[register] gagal hapus command global:', err.message));
     console.log(`✅ ${body.length} command terdaftar (${cfg.guildId ? `server ${cfg.guildId}` : 'global'})`);
   } catch (err) {
     console.error('[register] gagal daftar command:', err);
