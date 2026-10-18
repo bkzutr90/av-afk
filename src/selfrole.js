@@ -23,6 +23,13 @@ const ROLES = {
   girl: { name: 'Her', emoji: '👧', color: 0xe91e8c },
 };
 
+// Role tambahan untuk yang ingin trial team Arvexis. Bisa dipakai bersamaan dengan Him/Her (tidak saling mengganti).
+const TRIAL = {
+  id: process.env.TRIAL_ROLE_ID || '1561479733676482640',
+  name: 'Trial AVX',
+  emoji: '🎟️',
+};
+
 const ANNOUNCEMENT_ID = process.env.ANNOUNCEMENT_CHANNEL_ID || '1517467522658603090';
 const PICK_CHANNEL_ID = process.env.PICKROLE_CHANNEL_ID || '1558849936668368918'; // ambil-roles
 const CATEGORY_IDS = (
@@ -78,7 +85,7 @@ setInterval(() => {
 async function startVerify(i) {
   const key = `${i.guildId}:${i.user.id}`;
   if (isVerified(i.guildId, i.user.id)) {
-    return i.reply({ content: '✅ Kamu sudah terverifikasi. Silakan pilih **Him** atau **Her**.', flags: EPHEMERAL });
+    return i.reply({ content: '✅ Kamu sudah terverifikasi. Silakan pilih **Him**, **Her**, atau **Trial AVX**.', flags: EPHEMERAL });
   }
   const ageDays = (Date.now() - i.user.createdTimestamp) / 86_400_000;
   if (MIN_ACCOUNT_DAYS && ageDays < MIN_ACCOUNT_DAYS) {
@@ -132,7 +139,7 @@ async function checkCode(i) {
   if (input === p.code) {
     pending.delete(key);
     markVerified(i.guildId, i.user.id);
-    return i.reply({ content: '✅ Verifikasi berhasil!\nSekarang pilih **Him** atau **Her** di panel untuk membuka channel.', flags: EPHEMERAL });
+    return i.reply({ content: '✅ Verifikasi berhasil!\nSekarang pilih **Him** atau **Her** di panel untuk membuka channel (atau **Trial AVX** jika ingin trial team Arvexis).', flags: EPHEMERAL });
   }
   p.tries++;
   if (p.tries >= MAX_TRIES) {
@@ -220,14 +227,16 @@ function panelPayload() {
     .setTitle('🎭 Ambil Role')
     .setDescription(
       (VERIFY_ON ? '**1.** Klik **Verifikasi**, lalu jawab captcha yang muncul.\n**2.** Pilih role di bawah untuk membuka semua channel server.\n\n' : 'Pilih salah satu role di bawah untuk membuka semua channel server.\n\n') +
-        `${ROLES.boy.emoji} **Him**\n${ROLES.girl.emoji} **Her**\n\n` +
-        'Klik tombol role lagi untuk melepasnya. Memilih satu role otomatis mengganti role lainnya.'
+        `${ROLES.boy.emoji} **Him**\n${ROLES.girl.emoji} **Her**\n` +
+        `${TRIAL.emoji} **Trial AVX** — untuk kamu yang ingin trial team Arvexis\n\n` +
+        'Klik tombol role lagi untuk melepasnya. Memilih **Him** atau **Her** otomatis mengganti role lainnya. **Trial AVX** berdiri sendiri dan tidak menggantikan Him/Her.'
     );
   const row = new ActionRowBuilder();
   if (VERIFY_ON) row.addComponents(new ButtonBuilder().setCustomId('vf:start').setLabel('Verifikasi').setEmoji('✅').setStyle(ButtonStyle.Success));
   row.addComponents(
     new ButtonBuilder().setCustomId('sr:boy').setLabel('Him').setEmoji(ROLES.boy.emoji).setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('sr:girl').setLabel('Her').setEmoji(ROLES.girl.emoji).setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId('sr:girl').setLabel('Her').setEmoji(ROLES.girl.emoji).setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('sr:trial').setLabel(TRIAL.name).setEmoji(TRIAL.emoji).setStyle(ButtonStyle.Secondary)
   );
   return { embeds: [embed], components: [row] };
 }
@@ -260,6 +269,11 @@ const command = {
         if (log.failed.length) report += `\n⚠️ Gagal:\n${log.failed.slice(0, 10).map((f) => `• ${f}`).join('\n')}`;
       }
 
+      // Cek role Trial AVX (dibuat manual di server)
+      if (!guild.roles.cache.has(TRIAL.id)) {
+        report += `\n⚠️ Role Trial AVX (ID ${TRIAL.id}) tidak ditemukan di server ini.`;
+      }
+
       step = 'mengirim panel ke ambil-roles';
       const pick = await guild.channels.fetch(PICK_CHANNEL_ID).catch(() => null);
       if (!pick?.isTextBased()) return i.editReply(`${report}\n❌ Channel ambil-roles tidak ditemukan.`);
@@ -267,10 +281,50 @@ const command = {
       return i.editReply(`✅ Selesai. Panel dikirim ke ${pick}.\n${report}`.trim());
     } catch (err) {
       console.error('[selfrole] error:', err);
-      return i.editReply(`❌ Gagal saat **${step}**: \`${String(err.message).slice(0, 300)}\`\nPastikan bot punya Manage Roles + Manage Channels dan role bot ada di atas Him/Her.`);
+      return i.editReply(`❌ Gagal saat **${step}**: \`${String(err.message).slice(0, 300)}\`\nPastikan bot punya Manage Roles + Manage Channels dan role bot ada di atas Him/Her/Trial AVX.`);
     }
   },
 };
+
+// Toggle role Trial AVX (independen dari Him/Her)
+async function handleTrialToggle(i) {
+  const role = i.guild.roles.cache.get(TRIAL.id) || (await i.guild.roles.fetch(TRIAL.id).catch(() => null));
+  if (!role) {
+    await i.reply({ content: '❌ Role Trial AVX belum ada / ID salah. Hubungi admin.', flags: EPHEMERAL });
+    return;
+  }
+
+  const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+  if (!member) {
+    await i.reply({ content: '❌ Gagal mengambil data kamu.', flags: EPHEMERAL });
+    return;
+  }
+
+  const hasTrial = member.roles.cache.has(role.id);
+  const hasMain = ['boy', 'girl'].some((k) => {
+    const r = findRole(i.guild, k);
+    return r && member.roles.cache.has(r.id);
+  });
+
+  // Mengambil pertama kali wajib verifikasi (yang sudah punya Him/Her/Trial dianggap terverifikasi)
+  if (VERIFY_ON && !hasTrial && !hasMain && !isVerified(i.guildId, i.user.id)) {
+    await i.reply({ content: '🔐 Verifikasi dulu: klik tombol **✅ Verifikasi** di panel, lalu jawab captcha-nya.', flags: EPHEMERAL });
+    return;
+  }
+
+  try {
+    if (hasTrial) {
+      await member.roles.remove(role, 'Self role (Trial AVX)');
+      await i.reply({ content: `➖ Role **${role.name}** dilepas.`, flags: EPHEMERAL });
+    } else {
+      await member.roles.add(role, 'Self role (Trial AVX)');
+      await i.reply({ content: `✅ Kamu sekarang punya role **${role.name}**. Selamat mencoba trial team Arvexis!`, flags: EPHEMERAL });
+    }
+  } catch (err) {
+    console.warn('[selfrole][trial]', err.message);
+    await i.reply({ content: '❌ Bot tidak bisa memberi role. Hubungi admin (role bot harus di atas Trial AVX).', flags: EPHEMERAL });
+  }
+}
 
 async function handleSelfRoleInteraction(i) {
   if (i.isModalSubmit()) {
@@ -285,6 +339,10 @@ async function handleSelfRoleInteraction(i) {
   }
   if (i.customId === 'vf:enter') {
     await showCodeModal(i);
+    return true;
+  }
+  if (i.customId === 'sr:trial') {
+    await handleTrialToggle(i);
     return true;
   }
   if (!i.customId.startsWith('sr:')) return false;
