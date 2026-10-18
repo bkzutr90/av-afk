@@ -10,7 +10,7 @@ const EPHEMERAL = MessageFlags.Ephemeral;
 const KINDS = ['welcome', 'bye'];
 
 const DEFAULTS = {
-  welcome: 'Selamat datang di **{server}**! 🎉\nKamu member ke-**{count}**. Semoga betah ya!',
+  welcome: 'Selamat datang {user} di **{server}**! 🎉\nKamu member ke-**{count}**. Semoga betah ya!',
   bye: '**{username}** telah meninggalkan **{server}**. Sampai jumpa lagi! 👋',
 };
 const COLORS = { welcome: 0x2ecc71, bye: 0xe74c3c };
@@ -166,8 +166,6 @@ async function renderGreetingCard({ kind, name, subtitle, avatarUrl }) {
 async function buildPayload(kind, guild, user, s, { ping }) {
   const embed = new EmbedBuilder().setColor(COLORS[kind]).setDescription(format(s.message, user, guild).slice(0, 4000)).setTimestamp();
   const payload = { embeds: [embed], allowedMentions: { users: ping && kind === 'welcome' ? [user.id] : [] } };
-  // Hanya 1 mention: kalau template sudah memakai {user}, jangan tambah mention di atas pesan.
-  if (ping && kind === 'welcome' && !/\{user\}/i.test(s.message)) payload.content = `<@${user.id}>`;
 
   if (s.card) {
     try {
