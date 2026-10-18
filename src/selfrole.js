@@ -19,8 +19,8 @@ const { renderCaptcha } = require('./card');
 const EPHEMERAL = MessageFlags.Ephemeral;
 
 const ROLES = {
-  boy: { name: 'Boy', emoji: '👦', color: 0x3498db },
-  girl: { name: 'Girl', emoji: '👧', color: 0xe91e8c },
+  boy: { name: 'Him', emoji: '👦', color: 0x3498db },
+  girl: { name: 'Her', emoji: '👧', color: 0xe91e8c },
 };
 
 const ANNOUNCEMENT_ID = process.env.ANNOUNCEMENT_CHANNEL_ID || '1517467522658603090';
@@ -78,7 +78,7 @@ setInterval(() => {
 async function startVerify(i) {
   const key = `${i.guildId}:${i.user.id}`;
   if (isVerified(i.guildId, i.user.id)) {
-    return i.reply({ content: '✅ Kamu sudah terverifikasi. Silakan pilih **Boy** atau **Girl**.', flags: EPHEMERAL });
+    return i.reply({ content: '✅ Kamu sudah terverifikasi. Silakan pilih **Him** atau **Her**.', flags: EPHEMERAL });
   }
   const ageDays = (Date.now() - i.user.createdTimestamp) / 86_400_000;
   if (MIN_ACCOUNT_DAYS && ageDays < MIN_ACCOUNT_DAYS) {
@@ -132,7 +132,7 @@ async function checkCode(i) {
   if (input === p.code) {
     pending.delete(key);
     markVerified(i.guildId, i.user.id);
-    return i.reply({ content: '✅ Verifikasi berhasil!\nSekarang pilih **Boy** atau **Girl** di panel untuk membuka channel.', flags: EPHEMERAL });
+    return i.reply({ content: '✅ Verifikasi berhasil!\nSekarang pilih **Him** atau **Her** di panel untuk membuka channel.', flags: EPHEMERAL });
   }
   p.tries++;
   if (p.tries >= MAX_TRIES) {
@@ -220,14 +220,14 @@ function panelPayload() {
     .setTitle('🎭 Ambil Role')
     .setDescription(
       (VERIFY_ON ? '**1.** Klik **Verifikasi**, lalu jawab captcha yang muncul.\n**2.** Pilih role di bawah untuk membuka semua channel server.\n\n' : 'Pilih salah satu role di bawah untuk membuka semua channel server.\n\n') +
-        `${ROLES.boy.emoji} **Boy**\n${ROLES.girl.emoji} **Girl**\n\n` +
+        `${ROLES.boy.emoji} **Him**\n${ROLES.girl.emoji} **Her**\n\n` +
         'Klik tombol role lagi untuk melepasnya. Memilih satu role otomatis mengganti role lainnya.'
     );
   const row = new ActionRowBuilder();
   if (VERIFY_ON) row.addComponents(new ButtonBuilder().setCustomId('vf:start').setLabel('Verifikasi').setEmoji('✅').setStyle(ButtonStyle.Success));
   row.addComponents(
-    new ButtonBuilder().setCustomId('sr:boy').setLabel('Boy').setEmoji(ROLES.boy.emoji).setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('sr:girl').setLabel('Girl').setEmoji(ROLES.girl.emoji).setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId('sr:boy').setLabel('Him').setEmoji(ROLES.boy.emoji).setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('sr:girl').setLabel('Her').setEmoji(ROLES.girl.emoji).setStyle(ButtonStyle.Danger)
   );
   return { embeds: [embed], components: [row] };
 }
@@ -235,7 +235,7 @@ function panelPayload() {
 const command = {
   data: new SlashCommandBuilder()
     .setName('selfrole')
-    .setDescription('Setup role Boy/Girl & channel terkunci')
+    .setDescription('Setup role Him/Her & channel terkunci')
     .addSubcommand((s) => s.setName('setup').setDescription('Buat role, kunci kategori, dan kirim panel ke #ambil-roles'))
     .addSubcommand((s) => s.setName('panel').setDescription('Kirim ulang panel ambil role saja')),
   async execute(i) {
@@ -248,7 +248,7 @@ const command = {
     let step = 'ambil data role';
     try {
       await guild.roles.fetch(); // pastikan cache role lengkap
-      step = 'membuat role Boy/Girl';
+      step = 'membuat role Him/Her';
       const boy = await ensureRole(guild, 'boy');
       const girl = await ensureRole(guild, 'girl');
       let report = '';
@@ -267,7 +267,7 @@ const command = {
       return i.editReply(`✅ Selesai. Panel dikirim ke ${pick}.\n${report}`.trim());
     } catch (err) {
       console.error('[selfrole] error:', err);
-      return i.editReply(`❌ Gagal saat **${step}**: \`${String(err.message).slice(0, 300)}\`\nPastikan bot punya Manage Roles + Manage Channels dan role bot ada di atas Boy/Girl.`);
+      return i.editReply(`❌ Gagal saat **${step}**: \`${String(err.message).slice(0, 300)}\`\nPastikan bot punya Manage Roles + Manage Channels dan role bot ada di atas Him/Her.`);
     }
   },
 };
@@ -305,7 +305,7 @@ async function handleSelfRoleInteraction(i) {
     return true;
   }
 
-  // Mengambil role pertama kali wajib verifikasi (yang sudah punya Boy/Girl dianggap terverifikasi)
+  // Mengambil role pertama kali wajib verifikasi (yang sudah punya Him/Her dianggap terverifikasi)
   const already = member.roles.cache.has(role.id) || (otherRole && member.roles.cache.has(otherRole.id));
   if (VERIFY_ON && !already && !isVerified(i.guildId, i.user.id)) {
     await i.reply({ content: '🔐 Verifikasi dulu: klik tombol **✅ Verifikasi** di panel, lalu jawab captcha-nya.', flags: EPHEMERAL });
@@ -323,7 +323,7 @@ async function handleSelfRoleInteraction(i) {
     }
   } catch (err) {
     console.warn('[selfrole]', err.message);
-    await i.reply({ content: '❌ Bot tidak bisa memberi role. Hubungi admin (role bot harus di atas Boy/Girl).', flags: EPHEMERAL });
+    await i.reply({ content: '❌ Bot tidak bisa memberi role. Hubungi admin (role bot harus di atas Him/Her).', flags: EPHEMERAL });
   }
   return true;
 }
