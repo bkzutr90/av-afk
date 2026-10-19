@@ -17,6 +17,7 @@
     "dejavu-fonts-ttf": "^2.37.3",
     "discord.js": "^14.22.1",
     "dotenv": "^16.4.5",
-    "libsodium-wrappers": "^0.7.15"
+    "libsodium-wrappers": "^0.7.15",
+    "gifenc": "^1.0.3"
   }
 }
