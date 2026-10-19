@@ -17,7 +17,7 @@ const SPIN_SECONDS = 5; // lama roda berputar di GIF
 const FRAME_MS = 60; // jeda antar frame GIF
 const GIF_SCALE = 0.6; // GIF digambar lebih kecil supaya file ringan
 const MAX_ITEMS = 40;
-const SPIN_PUBLIC = process.env.SPIN_PUBLIC === '0'; // 1 = semua member boleh /spin; default hanya admin
+const SPIN_PUBLIC = process.env.SPIN_PUBLIC === '1'; // 1 = semua member boleh /spin; default hanya admin
 
 const spinning = new Set(); // guild yang sedang memutar roda (dipakai juga oleh bracket.js)
 
@@ -222,7 +222,7 @@ async function playSpin(i, { labels, winner, title, heading, subtitle, resultTex
     .setTitle(title)
     .setDescription(`Roda berputar... (${labels.length} pilihan)`)
     .setImage('attachment://spin.gif');
-  await i.editReply({ embeds: [spinEmbed], files: [new AttachmentBuilder(gif, { name: 'spin.gif' })], allowedMentions: NO_PING });
+  await i.editReply({ embeds: [spinEmbed], files: [new AttachmentBuilder(gif, { name: 'spin.gif' })], attachments: [], allowedMentions: NO_PING });
 
   await sleep(SPIN_SECONDS * 1000 + 1500); // tunggu GIF selesai berputar
 
@@ -381,4 +381,4 @@ const command = {
   },
 };
 
-module.exports = { command, playSpin, spinning, buildSpinGif, renderResultCard };
+module.exports = { command, playSpin, spinning, getItems, buildSpinGif, renderResultCard };

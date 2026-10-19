@@ -1,5 +1,6 @@
 // Bracket / bagan turnamen 16 tim + Spin Wheel undian slot.
-// Alur: /bracket tambah (daftar tim) -> /bracket spin (undi slot satu per satu) -> /bracket hasil (isi pemenang) -> /bracket tampil
+// Alur: /bracket tambah (tim) -> /bracket spin | spinall (undi slot) -> /bracket spinmk (map & killer tiap match, 16 besar s.d. final)
+//       -> /bracket hasil (isi pemenang) -> /bracket tampil | jadwal
 // Bagan digambar sebagai gambar PNG (canvas). Roda undian: GIF berputar dulu, lalu diganti kartu hasil (lihat wheel.js).
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { createCanvas } = require('@napi-rs/canvas');
@@ -7,7 +8,7 @@ const { randomInt } = require('crypto');
 const cfg = require('./config');
 const { db } = require('./db');
 require('./card'); // memastikan font CardRegular / CardBold sudah terdaftar
-const { playSpin, spinning } = require('./wheel'); // roda GIF + kartu hasil
+const { playSpin, spinning, getItems } = require('./wheel'); // roda GIF + kartu hasil + daftar map/killer
 
 const EPHEMERAL = MessageFlags.Ephemeral;
 const NO_PING = { parse: [] };
@@ -17,6 +18,7 @@ const DEFAULT_TITLE = 'ARVEXIS COMMUNITY — VIOLENCE DISTRICT FUN MATCH';
 const DEFAULT_PRIZE = 'Rp250.000';
 
 const pad = (n) => String(n).padStart(2, '0');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS bracket_event (
@@ -39,6 +41,14 @@ db.exec(`
     winner   INTEGER NOT NULL,             -- nomor slot pemenang
     PRIMARY KEY (guild_id, stage, idx)
   );
+  CREATE TABLE IF NOT EXISTS bracket_picks (
+    guild_id    TEXT NOT NULL,
+    stage       INTEGER NOT NULL,
+    idx         INTEGER NOT NULL,
+    map_name    TEXT NOT NULL,
+    killer_name TEXT NOT NULL,
+    PRIMARY KEY (guild_id, stage, idx)
+  );
 `);
 
 // ---------------------------------------------------------------- struktur match
@@ -59,8 +69,12 @@ function loadState(guildId) {
   for (const t of teams) if (t.slot) names[t.slot - 1] = t.name;
   const results = new Map();
   for (const r of db.prepare('SELECT stage, idx, winner FROM bracket_results WHERE guild_id=?').all(guildId)) results.set(`${r.stage}:${r.idx}`, r.winner);
+  const picks = new Map();
+  for (const r of db.prepare('SELECT stage, idx, map_name, killer_name FROM bracket_picks WHERE guild_id=?').all(guildId)) {
+    picks.set(`${r.stage}:${r.idx}`, { map: r.map_name, killer: r.killer_name });
+  }
   const ev = db.prepare('SELECT title, prize FROM bracket_event WHERE guild_id=?').get(guildId);
-  return { teams, names, results, title: ev?.title || DEFAULT_TITLE, prize: ev?.prize || DEFAULT_PRIZE };
+  return { teams, names, results, picks, title: ev?.title || DEFAULT_TITLE, prize: ev?.prize || DEFAULT_PRIZE };
 }
 
 // Kalau hasil sebuah match berubah / dihapus, hasil di babak berikutnya yang tidak valid lagi ikut dihapus.
@@ -103,16 +117,18 @@ function placeholder(r, j) {
   return `Pemenang ${r === 1 ? 'M' : r === 2 ? 'QF' : 'SF'}${j + 1}`;
 }
 
-function renderBracket({ title, prize, names, results }) {
-  const W = 1430;
+function renderBracket({ title, prize, names, results, picks }) {
+  const W = 1675;
   const H = 790;
   const X0 = 40;
-  const CW = 230;
-  const GAP = 50;
+  const CW = 215;
+  const GAP = 130; // ruang antar kolom: juga tempat tulisan map & killer tiap match
   const TOP = 120;
   const ROWH = 40;
   const BH = 32;
   const accent = cfg.accent;
+  const MAPC = '#7fd1ff';
+  const KILLC = '#ff8a80';
   const colX = (r) => X0 + r * (CW + GAP);
 
   const canvas = createCanvas(W, H);
@@ -140,23 +156,36 @@ function renderBracket({ title, prize, names, results }) {
   ctx.fillStyle = '#b9bbbe';
   ctx.fillText(`Prize Pool ${prize}`, W / 2, 74);
 
+  // Keterangan warna (kanan atas)
+  ctx.textAlign = 'right';
+  ctx.font = '15px CardBold';
+  ctx.fillStyle = KILLC;
+  ctx.fillText('Killer', W - 40, 74);
+  const kw = ctx.measureText('Killer').width;
+  ctx.fillStyle = '#8e9297';
+  ctx.fillText(' • ', W - 40 - kw, 74);
+  const sw = ctx.measureText(' • ').width;
+  ctx.fillStyle = MAPC;
+  ctx.fillText('Map', W - 40 - kw - sw, 74);
+
   // Judul kolom
+  ctx.textAlign = 'center';
   const heads = ['BABAK 16 BESAR', 'QUARTER FINAL', 'SEMIFINAL', 'GRAND FINAL', 'JUARA'];
   ctx.font = '17px CardBold';
   ctx.fillStyle = accent;
   heads.forEach((h, r) => ctx.fillText(h, colX(r) + CW / 2, 102));
 
-  // Garis penghubung
+  // Garis penghubung + map & killer tiap match
   ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
   for (let r = 1; r <= ROUNDS; r++) {
     for (let j = 0; j < SIZE >> r; j++) {
       const x1 = colX(r - 1) + CW;
-      const xm = x1 + GAP / 2;
+      const xm = x1 + 20;
       const x2 = colX(r);
       const ya = ys[r - 1][2 * j];
       const yb = ys[r - 1][2 * j + 1];
       const yp = ys[r][j];
+      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
       ctx.beginPath();
       ctx.moveTo(x1, ya);
       ctx.lineTo(xm, ya);
@@ -165,6 +194,17 @@ function renderBracket({ title, prize, names, results }) {
       ctx.moveTo(xm, yp);
       ctx.lineTo(x2, yp);
       ctx.stroke();
+
+      const pk = picks?.get(`${r}:${j}`);
+      if (pk) {
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = '12px CardBold';
+        ctx.fillStyle = MAPC;
+        ctx.fillText(fit(ctx, pk.map, GAP - 28), xm + 6, yp - 9);
+        ctx.fillStyle = KILLC;
+        ctx.fillText(fit(ctx, pk.killer, GAP - 28), xm + 6, yp + 10);
+      }
     }
   }
 
@@ -235,7 +275,7 @@ const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuil
 const adminOnly = (i) => i.reply({ content: '❌ Hanya admin (izin **Manage Server**) yang bisa memakai perintah ini.', flags: EPHEMERAL });
 
 const bracketAttachment = (st) =>
-  new AttachmentBuilder(renderBracket({ title: st.title, prize: st.prize, names: st.names, results: st.results }), { name: 'bracket.png' });
+  new AttachmentBuilder(renderBracket({ title: st.title, prize: st.prize, names: st.names, results: st.results, picks: st.picks }), { name: 'bracket.png' });
 
 async function doSpin(i) {
   const g = i.guildId;
@@ -275,11 +315,188 @@ async function doSpin(i) {
       resultText:
         `🎯 **${picked.name}** mendapat **Slot ${pad(slot)}**\n` +
         `Match ${pad(matchNo)}: ${opp ? `vs **${opp}**` : 'lawan belum diundi'}\n` +
-        (left ? `Sisa **${left}** tim belum diundi.` : '✅ **Undian selesai!** Pakai `/bracket tampil` untuk melihat bagan.'),
+        (left ? `Sisa **${left}** tim belum diundi.` : '✅ **Undian selesai!** Lanjut `/bracket spinmk` untuk map & killer tiap match.'),
     });
   } catch (err) {
     console.error('[bracket] spin gagal:', err);
     await i.editReply({ content: '❌ Terjadi error saat memutar roda. Cek `/bracket daftar` untuk melihat hasil undian terakhir.', embeds: [], files: [], attachments: [] }).catch(() => {});
+  } finally {
+    spinning.delete(g);
+  }
+}
+
+// ---------------------------------------------------------------- map & killer per match + undian massal
+const boxLabel = (st, r, j) => {
+  const slot = slotOf(st.results, r, j);
+  return slot ? st.names[slot - 1] || `Tim ${pad(slot)}` : placeholder(r, j);
+};
+const versus = (st, m) => `${boxLabel(st, m.r - 1, m.j * 2)} vs ${boxLabel(st, m.r - 1, m.j * 2 + 1)}`;
+
+function matchLine(st, key) {
+  const m = MATCHES[key];
+  const pk = st.picks.get(`${m.r}:${m.j}`);
+  return `**${m.short}:** ${versus(st, m)}\n↳ ${pk ? `🗺️ **${pk.map}** • 🔪 **${pk.killer}**` : '_map & killer belum di-spin_'}`;
+}
+
+function jadwalEmbed(st) {
+  const keys = Object.keys(MATCHES); // M1..M8, QF1..QF4, SF1, SF2, F
+  const grp = (a, b) => keys.slice(a, b).map((k) => matchLine(st, k)).join('\n').slice(0, 1024);
+  return new EmbedBuilder()
+    .setColor(cfg.accent)
+    .setTitle('📅 Jadwal Match, Map & Killer')
+    .addFields(
+      { name: '16 Besar (Match 01–04)', value: grp(0, 4) },
+      { name: '16 Besar (Match 05–08)', value: grp(4, 8) },
+      { name: 'Quarter Final', value: grp(8, 12) },
+      { name: 'Semifinal & Grand Final', value: grp(12, 15) }
+    );
+}
+
+const savePick = (g, m, map, killer) =>
+  db
+    .prepare(
+      `INSERT INTO bracket_picks (guild_id, stage, idx, map_name, killer_name) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(guild_id, stage, idx) DO UPDATE SET map_name=excluded.map_name, killer_name=excluded.killer_name`
+    )
+    .run(g, m.r, m.j, map, killer);
+
+// Map/killer yang sudah dipakai match lain tidak muncul lagi di roda sampai semuanya terpakai (lalu mulai putaran baru).
+function usedSets(st, exceptKey) {
+  const um = new Set();
+  const uk = new Set();
+  for (const [k, p] of st.picks) {
+    if (k === exceptKey) continue;
+    um.add(p.map.toLowerCase());
+    uk.add(p.killer.toLowerCase());
+  }
+  return { um, uk };
+}
+function candidates(items, used) {
+  let c = items.filter((n) => !used.has(n.toLowerCase()));
+  if (!c.length) {
+    used.clear();
+    c = items.slice();
+  }
+  return c;
+}
+function pickOne(items, used) {
+  const c = candidates(items, used);
+  const p = c[randomInt(c.length)];
+  used.add(p.toLowerCase());
+  return p;
+}
+
+/** /bracket spinall : undi semua tim yang tersisa sekaligus (tanpa animasi). */
+async function doSpinAll(i) {
+  const g = i.guildId;
+  if (spinning.has(g)) return i.reply({ content: '⏳ Roda masih berputar, tunggu sebentar.', flags: EPHEMERAL });
+
+  const used = new Set(db.prepare('SELECT slot FROM bracket_teams WHERE guild_id=? AND slot IS NOT NULL').all(g).map((r) => r.slot));
+  const free = [];
+  for (let s = 1; s <= SIZE; s++) if (!used.has(s)) free.push(s);
+  const pool = db.prepare('SELECT id, name FROM bracket_teams WHERE guild_id=? AND slot IS NULL ORDER BY id').all(g);
+  if (!free.length) return i.reply({ content: '✅ Semua slot sudah terisi. Lihat hasilnya dengan `/bracket tampil`.', flags: EPHEMERAL });
+  if (!pool.length) return i.reply({ content: '❌ Tidak ada tim yang tersisa untuk diundi. Tambahkan dulu dengan `/bracket tambah`.', flags: EPHEMERAL });
+
+  spinning.add(g);
+  try {
+    await i.deferReply();
+    let n = 0;
+    for (const slot of free) {
+      if (!pool.length) break;
+      const t = pool.splice(randomInt(pool.length), 1)[0];
+      db.prepare('UPDATE bracket_teams SET slot=? WHERE id=?').run(slot, t.id);
+      n++;
+    }
+    const st = loadState(g);
+    const total = st.teams.length;
+    const embed = new EmbedBuilder()
+      .setColor(cfg.accent)
+      .setTitle('🎲 Undian Semua Tim Selesai')
+      .setDescription(`**${n}** tim diundi acak ke slot bagan.` + (total < SIZE ? `\n⚠️ Baru ${total}/${SIZE} tim terdaftar, sisa slot masih kosong.` : '\nLanjut `/bracket spinmk` untuk map & killer tiap match.'))
+      .setImage('attachment://bracket.png');
+    await i.editReply({ embeds: [embed], files: [bracketAttachment(st)], allowedMentions: NO_PING });
+  } catch (err) {
+    console.error('[bracket] spinall gagal:', err);
+    await i.editReply({ content: '❌ Terjadi error saat mengundi. Cek `/bracket daftar`.', embeds: [], files: [], attachments: [] }).catch(() => {});
+  } finally {
+    spinning.delete(g);
+  }
+}
+
+/** /bracket spinmk : spin map lalu killer untuk 1 match (berikutnya yang belum di-spin, atau `match`), atau `semua`. */
+async function doSpinMk(i) {
+  const g = i.guildId;
+  if (spinning.has(g)) return i.reply({ content: '⏳ Roda masih berputar, tunggu sebentar.', flags: EPHEMERAL });
+
+  const maps = getItems(g, 'map');
+  const killers = getItems(g, 'killer');
+  if (maps.length < 2 || killers.length < 2) {
+    return i.reply({ content: '❌ Daftar map dan killer masing-masing minimal 2. Isi dulu dengan `/spin tambah`.', flags: EPHEMERAL });
+  }
+
+  const st = loadState(g);
+  const all = i.options.getBoolean('semua') === true;
+  const wanted = i.options.getString('match');
+  const missing = Object.keys(MATCHES).filter((k) => !st.picks.has(`${MATCHES[k].r}:${MATCHES[k].j}`));
+  const key = wanted || missing[0];
+  if (!key || (all && !missing.length)) {
+    return i.reply({
+      content: 'Semua match sudah punya map & killer. Pilih `match:` untuk spin ulang satu match, atau `/bracket reset bagian:Map & killer saja`.',
+      flags: EPHEMERAL,
+    });
+  }
+
+  spinning.add(g);
+  try {
+    await i.deferReply();
+
+    if (all) {
+      const { um, uk } = usedSets(st, null);
+      for (const k of missing) {
+        const m = MATCHES[k];
+        const mp = pickOne(maps, um);
+        const kl = pickOne(killers, uk);
+        savePick(g, m, mp, kl);
+        st.picks.set(`${m.r}:${m.j}`, { map: mp, killer: kl });
+      }
+      const embed = jadwalEmbed(st).setImage('attachment://bracket.png');
+      await i.editReply({ content: `✅ Map & killer untuk **${missing.length}** match sudah di-spin.`, embeds: [embed], files: [bracketAttachment(st)], allowedMentions: NO_PING });
+      return;
+    }
+
+    const m = MATCHES[key];
+    const { um, uk } = usedSets(st, `${m.r}:${m.j}`);
+    const mapLabels = candidates(maps, um);
+    const killerLabels = candidates(killers, uk);
+    const wm = randomInt(mapLabels.length);
+    const wk = randomInt(killerLabels.length);
+    const mapName = mapLabels[wm];
+    const killerName = killerLabels[wk];
+    savePick(g, m, mapName, killerName); // simpan dulu, animasi hanya tampilan
+
+    const vs = versus(st, m);
+    const tag = m.short.toUpperCase();
+    await playSpin(i, {
+      labels: mapLabels,
+      winner: wm,
+      title: `🗺️ Spin Map • ${m.short}`,
+      heading: `MAP • ${tag}`,
+      subtitle: vs,
+      resultText: `**${m.label}**\n${vs}\n🗺️ Map: **${mapName}**\n🔪 Killer: _diputar berikutnya..._`,
+    });
+    await sleep(2500);
+    await playSpin(i, {
+      labels: killerLabels,
+      winner: wk,
+      title: `🔪 Spin Killer • ${m.short}`,
+      heading: `KILLER • ${tag}`,
+      subtitle: `Map: ${mapName}`,
+      resultText: `**${m.label}**\n${vs}\n🗺️ Map: **${mapName}**\n🔪 Killer: **${killerName}**`,
+    });
+  } catch (err) {
+    console.error('[bracket] spinmk gagal:', err);
+    await i.editReply({ content: '❌ Terjadi error saat memutar roda. Cek `/bracket jadwal`.', embeds: [], files: [], attachments: [] }).catch(() => {});
   } finally {
     spinning.delete(g);
   }
@@ -310,6 +527,15 @@ const command = {
     )
     .addSubcommand((s) => s.setName('daftar').setDescription('Lihat daftar tim & slot undian'))
     .addSubcommand((s) => s.setName('spin').setDescription('Putar roda: undi 1 tim ke slot berikutnya (admin)'))
+    .addSubcommand((s) => s.setName('spinall').setDescription('Undi semua tim yang tersisa sekaligus, tanpa animasi (admin)'))
+    .addSubcommand((s) =>
+      s
+        .setName('spinmk')
+        .setDescription('Spin map & killer untuk match berikutnya yang belum di-spin (admin)')
+        .addStringOption((o) => o.setName('match').setDescription('Match tertentu (kosong = berikutnya yang belum di-spin)').addChoices(...matchChoices))
+        .addBooleanOption((o) => o.setName('semua').setDescription('Spin semua match yang belum punya map & killer sekaligus, tanpa animasi'))
+    )
+    .addSubcommand((s) => s.setName('jadwal').setDescription('Lihat semua match beserta map & killer-nya'))
     .addSubcommand((s) =>
       s
         .setName('hasil')
@@ -330,6 +556,7 @@ const command = {
             .addChoices(
               { name: 'Hasil match saja', value: 'hasil' },
               { name: 'Undian + hasil (tim tetap ada)', value: 'undian' },
+              { name: 'Map & killer saja', value: 'mapkiller' },
               { name: 'Semuanya (tim, undian, hasil)', value: 'semua' }
             )
         )
@@ -343,6 +570,12 @@ const command = {
       await i.deferReply();
       const st = loadState(g);
       return i.editReply({ files: [bracketAttachment(st)] });
+    }
+
+    if (sub === 'jadwal') {
+      await i.deferReply();
+      const st = loadState(g);
+      return i.editReply({ embeds: [jadwalEmbed(st)], allowedMentions: NO_PING });
     }
 
     if (sub === 'daftar') {
@@ -416,6 +649,8 @@ const command = {
     }
 
     if (sub === 'spin') return doSpin(i);
+    if (sub === 'spinall') return doSpinAll(i);
+    if (sub === 'spinmk') return doSpinMk(i);
 
     if (sub === 'hasil') {
       const m = MATCHES[i.options.getString('match', true)];
@@ -469,10 +704,16 @@ const command = {
     if (sub === 'reset') {
       const part = i.options.getString('bagian', true);
       if (spinning.has(g)) return i.reply({ content: '⏳ Roda masih berputar, tunggu sebentar.', flags: EPHEMERAL });
-      db.prepare('DELETE FROM bracket_results WHERE guild_id=?').run(g);
+      if (part !== 'mapkiller') db.prepare('DELETE FROM bracket_results WHERE guild_id=?').run(g);
       if (part === 'undian') db.prepare('UPDATE bracket_teams SET slot=NULL WHERE guild_id=?').run(g);
+      if (part === 'mapkiller' || part === 'semua') db.prepare('DELETE FROM bracket_picks WHERE guild_id=?').run(g);
       if (part === 'semua') db.prepare('DELETE FROM bracket_teams WHERE guild_id=?').run(g);
-      const label = { hasil: 'Hasil match direset.', undian: 'Undian & hasil direset. Tim tetap terdaftar.', semua: 'Semua data bracket dihapus.' }[part];
+      const label = {
+        hasil: 'Hasil match direset.',
+        undian: 'Undian & hasil direset. Tim tetap terdaftar, map & killer tetap tersimpan.',
+        mapkiller: 'Map & killer tiap match direset.',
+        semua: 'Semua data bracket dihapus.',
+      }[part];
       return i.reply({ content: `♻️ ${label}`, flags: EPHEMERAL });
     }
   },
