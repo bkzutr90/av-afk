@@ -1,12 +1,13 @@
 // Bracket / bagan turnamen 16 tim + Spin Wheel undian slot.
 // Alur: /bracket tambah (daftar tim) -> /bracket spin (undi slot satu per satu) -> /bracket hasil (isi pemenang) -> /bracket tampil
-// Bagan digambar sebagai gambar PNG (canvas), roda undian dianimasikan lewat edit pesan beberapa frame.
+// Bagan digambar sebagai gambar PNG (canvas). Roda undian: GIF berputar dulu, lalu diganti kartu hasil (lihat wheel.js).
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { createCanvas } = require('@napi-rs/canvas');
 const { randomInt } = require('crypto');
 const cfg = require('./config');
 const { db } = require('./db');
 require('./card'); // memastikan font CardRegular / CardBold sudah terdaftar
+const { playSpin, spinning } = require('./wheel'); // roda GIF + kartu hasil
 
 const EPHEMERAL = MessageFlags.Ephemeral;
 const NO_PING = { parse: [] };
@@ -16,7 +17,6 @@ const DEFAULT_TITLE = 'ARVEXIS COMMUNITY — VIOLENCE DISTRICT FUN MATCH';
 const DEFAULT_PRIZE = 'Rp250.000';
 
 const pad = (n) => String(n).padStart(2, '0');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS bracket_event (
@@ -230,99 +230,12 @@ function renderBracket({ title, prize, names, results }) {
   return canvas.toBuffer('image/png');
 }
 
-// ---------------------------------------------------------------- gambar roda
-const PALETTE = ['#e74c3c', '#e67e22', '#d4a017', '#2ecc71', '#1abc9c', '#3498db', '#9b59b6', '#e84393'];
-
-/** Gambar roda. Penunjuk ada di atas (arah -90°). Irisan ke-i mulai di sudut `angle + i*step`. */
-function renderWheel(labels, angle, winnerIdx = null) {
-  const W = 580;
-  const H = 600;
-  const cx = W / 2;
-  const cy = 330;
-  const R = 250;
-  const n = labels.length;
-  const step = (Math.PI * 2) / n;
-  const canvas = createCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-
-  const bg = ctx.createLinearGradient(0, 0, W, H);
-  bg.addColorStop(0, '#1b1d24');
-  bg.addColorStop(1, '#2b2f3a');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  const fontSize = n > 10 ? 17 : n > 6 ? 20 : 24;
-  for (let i = 0; i < n; i++) {
-    let ci = i % PALETTE.length;
-    if (i === n - 1 && n > 1 && ci === 0) ci = 3; // irisan terakhir jangan sama warna dengan irisan pertama
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, R, angle + i * step, angle + (i + 1) * step);
-    ctx.closePath();
-    ctx.fillStyle = PALETTE[ci];
-    ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#1b1d24';
-    ctx.stroke();
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(angle + (i + 0.5) * step);
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    ctx.font = `${fontSize}px CardBold`;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(fit(ctx, labels[i], R - 80), R - 20, 0);
-    ctx.restore();
-  }
-
-  if (winnerIdx !== null) {
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, R - 2, angle + winnerIdx * step, angle + (winnerIdx + 1) * step);
-    ctx.closePath();
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = '#ffffff';
-    ctx.stroke();
-  }
-
-  // Cincin luar + hub tengah
-  ctx.beginPath();
-  ctx.arc(cx, cy, R + 4, 0, Math.PI * 2);
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = cfg.accent;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cx, cy, 30, 0, Math.PI * 2);
-  ctx.fillStyle = '#1b1d24';
-  ctx.fill();
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = cfg.accent;
-  ctx.stroke();
-
-  // Penunjuk
-  ctx.beginPath();
-  ctx.moveTo(cx - 20, cy - R - 28);
-  ctx.lineTo(cx + 20, cy - R - 28);
-  ctx.lineTo(cx, cy - R + 12);
-  ctx.closePath();
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#1b1d24';
-  ctx.stroke();
-
-  return canvas.toBuffer('image/png');
-}
-
 // ---------------------------------------------------------------- aksi
 const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 const adminOnly = (i) => i.reply({ content: '❌ Hanya admin (izin **Manage Server**) yang bisa memakai perintah ini.', flags: EPHEMERAL });
 
 const bracketAttachment = (st) =>
   new AttachmentBuilder(renderBracket({ title: st.title, prize: st.prize, names: st.names, results: st.results }), { name: 'bracket.png' });
-
-const spinning = new Set(); // guild yang sedang memutar roda
 
 async function doSpin(i) {
   const g = i.guildId;
@@ -348,40 +261,22 @@ async function doSpin(i) {
     const picked = pool[w];
     db.prepare('UPDATE bracket_teams SET slot=? WHERE id=?').run(slot, picked.id); // simpan dulu, animasi hanya tampilan
 
-    const labels = pool.map((t) => t.name);
-    const step = (Math.PI * 2) / labels.length;
-    const start = Math.random() * Math.PI * 2;
-    const target = -Math.PI / 2 - (w + 0.5) * step + (Math.random() - 0.5) * step * 0.6;
-    const delta = ((((target - start) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) + Math.PI * 2 * 5;
     const matchNo = Math.ceil(slot / 2);
+    const partner = slot % 2 === 1 ? slot + 1 : slot - 1;
+    const opp = db.prepare('SELECT name FROM bracket_teams WHERE guild_id=? AND slot=?').get(g, partner)?.name;
+    const left = pool.length - 1;
 
-    const FRAMES = 8;
-    for (let k = 1; k <= FRAMES; k++) {
-      const last = k === FRAMES;
-      const t = k / FRAMES;
-      const eased = 1 - (1 - t) ** 3;
-      const png = renderWheel(labels, start + delta * eased, last ? w : null);
-
-      const embed = new EmbedBuilder()
-        .setColor(cfg.accent)
-        .setTitle(`🎡 Undian Slot ${pad(slot)} • Match ${pad(matchNo)}`)
-        .setImage('attachment://wheel.png');
-
-      if (!last) {
-        embed.setDescription(`Roda berputar... (${labels.length} tim di roda)`);
-      } else {
-        const partner = slot % 2 === 1 ? slot + 1 : slot - 1;
-        const opp = db.prepare('SELECT name FROM bracket_teams WHERE guild_id=? AND slot=?').get(g, partner)?.name;
-        const left = labels.length - 1;
-        embed.setDescription(
-          `🎯 **${picked.name}** mendapat **Slot ${pad(slot)}**\n` +
-            `Match ${pad(matchNo)}: ${opp ? `vs **${opp}**` : 'lawan belum diundi'}\n` +
-            (left ? `Sisa **${left}** tim belum diundi.` : '✅ **Undian selesai!** Pakai `/bracket tampil` untuk melihat bagan.')
-        );
-      }
-      await i.editReply({ embeds: [embed], files: [new AttachmentBuilder(png, { name: 'wheel.png' })], attachments: [], allowedMentions: NO_PING });
-      if (!last) await sleep(1000);
-    }
+    await playSpin(i, {
+      labels: pool.map((t) => t.name),
+      winner: w,
+      title: `🎡 Undian Slot ${pad(slot)} • Match ${pad(matchNo)}`,
+      heading: `SLOT ${pad(slot)} • MATCH ${pad(matchNo)}`,
+      subtitle: opp ? `vs ${opp}` : 'Lawan belum diundi',
+      resultText:
+        `🎯 **${picked.name}** mendapat **Slot ${pad(slot)}**\n` +
+        `Match ${pad(matchNo)}: ${opp ? `vs **${opp}**` : 'lawan belum diundi'}\n` +
+        (left ? `Sisa **${left}** tim belum diundi.` : '✅ **Undian selesai!** Pakai `/bracket tampil` untuk melihat bagan.'),
+    });
   } catch (err) {
     console.error('[bracket] spin gagal:', err);
     await i.editReply({ content: '❌ Terjadi error saat memutar roda. Cek `/bracket daftar` untuk melihat hasil undian terakhir.', embeds: [], files: [], attachments: [] }).catch(() => {});
