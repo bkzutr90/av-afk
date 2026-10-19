@@ -308,6 +308,10 @@ def(
 const { command: bracketCommand } = require('./bracket');
 commands.set(bracketCommand.data.name, bracketCommand);
 
+// ------------------------------------------------------------------ /spin
+const { command: spinCommand } = require('./wheel');
+commands.set(spinCommand.data.name, spinCommand);
+
 // ------------------------------------------------------------------ /tempvoice
 const { command: tempvoiceCommand } = require('./tempvoice');
 commands.set(tempvoiceCommand.data.name, tempvoiceCommand);
