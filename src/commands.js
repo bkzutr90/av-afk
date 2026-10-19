@@ -304,6 +304,10 @@ def(
   }
 );
 
+// ------------------------------------------------------------------ /bracket
+const { command: bracketCommand } = require('./bracket');
+commands.set(bracketCommand.data.name, bracketCommand);
+
 // ------------------------------------------------------------------ /tempvoice
 const { command: tempvoiceCommand } = require('./tempvoice');
 commands.set(tempvoiceCommand.data.name, tempvoiceCommand);
