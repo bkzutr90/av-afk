@@ -17,7 +17,7 @@ const SPIN_SECONDS = 5; // lama roda berputar di GIF
 const FRAME_MS = 60; // jeda antar frame GIF
 const GIF_SCALE = 0.6; // GIF digambar lebih kecil supaya file ringan
 const MAX_ITEMS = 40;
-const SPIN_PUBLIC = process.env.SPIN_PUBLIC === '1'; // 1 = semua member boleh /spin; default hanya admin
+const SPIN_PUBLIC = process.env.SPIN_PUBLIC === '0'; // 1 = semua member boleh /spin; default hanya admin
 
 const spinning = new Set(); // guild yang sedang memutar roda (dipakai juga oleh bracket.js)
 
