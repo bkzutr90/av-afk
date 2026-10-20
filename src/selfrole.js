@@ -74,6 +74,43 @@ const isVerified = (guildId, userId) => !!db.prepare('SELECT 1 FROM selfrole_ver
 const markVerified = (guildId, userId) =>
   db.prepare('INSERT OR REPLACE INTO selfrole_verified (guild_id, user_id, verified_at) VALUES (?, ?, ?)').run(guildId, userId, Date.now());
 
+// ------------------------------------------------------------------ pengaturan (on/off Trial AVX + lokasi panel)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS selfrole_settings (
+    guild_id         TEXT PRIMARY KEY,
+    trial_open       INTEGER NOT NULL DEFAULT 1,
+    panel_channel_id TEXT,
+    panel_message_id TEXT
+  );
+`);
+const getSettings = (guildId) =>
+  db.prepare('SELECT * FROM selfrole_settings WHERE guild_id=?').get(guildId) || { trial_open: 1 };
+const isTrialOpen = (guildId) => getSettings(guildId).trial_open !== 0;
+const setTrialOpen = (guildId, open) =>
+  db
+    .prepare('INSERT INTO selfrole_settings (guild_id, trial_open) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET trial_open=excluded.trial_open')
+    .run(guildId, open ? 1 : 0);
+const savePanel = (guildId, channelId, messageId) =>
+  db
+    .prepare(
+      'INSERT INTO selfrole_settings (guild_id, panel_channel_id, panel_message_id) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET panel_channel_id=excluded.panel_channel_id, panel_message_id=excluded.panel_message_id'
+    )
+    .run(guildId, channelId, messageId);
+
+// Edit panel yang sudah terkirim supaya tombol Trial ikut berubah
+async function refreshPanel(guild) {
+  const s = getSettings(guild.id);
+  if (!s.panel_channel_id || !s.panel_message_id) return false;
+  try {
+    const ch = await guild.channels.fetch(s.panel_channel_id);
+    const msg = await ch.messages.fetch(s.panel_message_id);
+    await msg.edit(panelPayload(guild.id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const pending = new Map(); // "guild:user" -> { code, expires, tries }
 const locked = new Map(); // "guild:user" -> timestamp sampai kapan diblokir
 setInterval(() => {
@@ -221,14 +258,15 @@ async function setupPermissions(guild, boy, girl) {
   return log;
 }
 
-function panelPayload() {
+function panelPayload(guildId) {
+  const open = isTrialOpen(guildId);
   const embed = new EmbedBuilder()
     .setColor(cfg.accent)
     .setTitle('🎭 Ambil Role')
     .setDescription(
       (VERIFY_ON ? '**1.** Klik **Verifikasi**, lalu jawab captcha yang muncul.\n**2.** Pilih role di bawah untuk membuka semua channel server.\n\n' : 'Pilih salah satu role di bawah untuk membuka semua channel server.\n\n') +
         `${ROLES.boy.emoji} **Him**\n${ROLES.girl.emoji} **Her**\n` +
-        `${TRIAL.emoji} **Trial AVX** — untuk kamu yang ingin trial team Arvexis\n\n` +
+        `${TRIAL.emoji} **Trial AVX** — ${open ? 'untuk kamu yang ingin trial team Arvexis' : '🔒 *pendaftaran trial sedang ditutup*'}\n\n` +
         'Klik tombol role lagi untuk melepasnya. Memilih **Him** atau **Her** otomatis mengganti role lainnya. **Trial AVX** berdiri sendiri dan tidak menggantikan Him/Her.'
     );
   const row = new ActionRowBuilder();
@@ -236,7 +274,12 @@ function panelPayload() {
   row.addComponents(
     new ButtonBuilder().setCustomId('sr:boy').setLabel('Him').setEmoji(ROLES.boy.emoji).setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('sr:girl').setLabel('Her').setEmoji(ROLES.girl.emoji).setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('sr:trial').setLabel(TRIAL.name).setEmoji(TRIAL.emoji).setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder()
+      .setCustomId('sr:trial')
+      .setLabel(open ? TRIAL.name : `${TRIAL.name} (Tutup)`)
+      .setEmoji(TRIAL.emoji)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!open)
   );
   return { embeds: [embed], components: [row] };
 }
@@ -246,7 +289,19 @@ const command = {
     .setName('selfrole')
     .setDescription('Setup role Him/Her & channel terkunci')
     .addSubcommand((s) => s.setName('setup').setDescription('Buat role, kunci kategori, dan kirim panel ke #ambil-roles'))
-    .addSubcommand((s) => s.setName('panel').setDescription('Kirim ulang panel ambil role saja')),
+    .addSubcommand((s) => s.setName('panel').setDescription('Kirim ulang panel ambil role saja'))
+    .addSubcommand((s) =>
+      s
+        .setName('trial')
+        .setDescription('Buka/tutup pendaftaran role Trial AVX')
+        .addStringOption((o) =>
+          o
+            .setName('status')
+            .setDescription('on = dibuka, off = ditutup')
+            .setRequired(true)
+            .addChoices({ name: 'on (dibuka)', value: 'on' }, { name: 'off (ditutup)', value: 'off' })
+        )
+    ),
   async execute(i) {
     if (!canManage(i)) {
       return i.reply({ content: '❌ Kamu tidak punya izin untuk memakai command ini.', flags: EPHEMERAL });
@@ -254,6 +309,18 @@ const command = {
     await i.deferReply({ flags: EPHEMERAL });
     const guild = i.guild;
     const sub = i.options.getSubcommand();
+
+    // On/off Trial AVX: tidak perlu membuat role / mengatur izin channel
+    if (sub === 'trial') {
+      const open = i.options.getString('status', true) === 'on';
+      setTrialOpen(guild.id, open);
+      const updated = await refreshPanel(guild);
+      return i.editReply(
+        `${open ? '✅ Role **Trial AVX** sekarang **DIBUKA**.' : '🔒 Role **Trial AVX** sekarang **DITUTUP**.'}` +
+          `\n${updated ? 'Panel di #ambil-roles sudah diperbarui.' : 'ℹ️ Panel belum bisa diperbarui otomatis. Kirim ulang dengan `/selfrole panel` (sekali saja).'}`
+      );
+    }
+
     let step = 'ambil data role';
     try {
       await guild.roles.fetch(); // pastikan cache role lengkap
@@ -277,7 +344,8 @@ const command = {
       step = 'mengirim panel ke ambil-roles';
       const pick = await guild.channels.fetch(PICK_CHANNEL_ID).catch(() => null);
       if (!pick?.isTextBased()) return i.editReply(`${report}\n❌ Channel ambil-roles tidak ditemukan.`);
-      await pick.send(panelPayload());
+      const sent = await pick.send(panelPayload(guild.id));
+      savePanel(guild.id, pick.id, sent.id); // simpan supaya panel bisa di-edit saat Trial di-on/off
       return i.editReply(`✅ Selesai. Panel dikirim ke ${pick}.\n${report}`.trim());
     } catch (err) {
       console.error('[selfrole] error:', err);
@@ -305,6 +373,12 @@ async function handleTrialToggle(i) {
     const r = findRole(i.guild, k);
     return r && member.roles.cache.has(r.id);
   });
+
+  // Pendaftaran ditutup: yang belum punya role tidak bisa mengambil (yang sudah punya tetap bisa melepas)
+  if (!hasTrial && !isTrialOpen(i.guildId)) {
+    await i.reply({ content: '🔒 Pendaftaran **Trial AVX** sedang ditutup.', flags: EPHEMERAL });
+    return;
+  }
 
   // Mengambil pertama kali wajib verifikasi (yang sudah punya Him/Her/Trial dianggap terverifikasi)
   if (VERIFY_ON && !hasTrial && !hasMain && !isVerified(i.guildId, i.user.id)) {
