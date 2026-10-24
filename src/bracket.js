@@ -1,6 +1,7 @@
 // Bracket / bagan turnamen 16 tim + Spin Wheel undian slot.
 // Alur: /bracket tambah (tim) -> /bracket spin | spinall (undi slot) -> /bracket spinmk (map & killer tiap match, 16 besar s.d. final)
 //       -> /bracket hasil (isi pemenang) -> /bracket tampil | jadwal
+// Bagan yang sudah jadi bisa diedit lewat /bracket edit (tukar posisi tim, isi posisi, map & killer manual, ganti nama tim).
 // Bagan digambar sebagai gambar PNG (canvas). Roda undian: GIF berputar dulu, lalu diganti kartu hasil (lihat wheel.js).
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { createCanvas } = require('@napi-rs/canvas');
@@ -49,6 +50,13 @@ db.exec(`
     killer_name TEXT NOT NULL,
     PRIMARY KEY (guild_id, stage, idx)
   );
+  CREATE TABLE IF NOT EXISTS bracket_overrides (
+    guild_id TEXT NOT NULL,
+    stage    INTEGER NOT NULL,             -- kolom bagan 1 = QF, 2 = SF, 3 = Grand Final (kolom 0 = slot, diedit lewat tukar slot)
+    idx      INTEGER NOT NULL,             -- posisi kotak di kolom itu (mulai 0, dari atas)
+    slot     INTEGER NOT NULL,             -- tim (nomor slot) yang ditempatkan manual di kotak itu
+    PRIMARY KEY (guild_id, stage, idx)
+  );
 `);
 
 // ---------------------------------------------------------------- struktur match
@@ -59,16 +67,22 @@ for (let j = 0; j < 4; j++) MATCHES[`QF${j + 1}`] = { r: 2, j, label: `Quarter F
 for (let j = 0; j < 2; j++) MATCHES[`SF${j + 1}`] = { r: 3, j, label: `Semifinal ${j + 1}`, short: `SF ${j + 1}` };
 MATCHES.F = { r: 4, j: 0, label: 'Grand Final', short: 'Grand Final' };
 
-// Slot yang menempati kotak (r, j): r=0 -> slot awal; r>0 -> pemenang match (r, j) kalau sudah ada.
-const slotOf = (results, r, j) => (r === 0 ? j + 1 : (results.get(`${r}:${j}`) ?? null));
+// Hasil match + penempatan manual (override) hasil /bracket edit. `over` menimpa pemenang di kotak itu.
+class Results extends Map {
+  over = new Map(); // "r:j" -> slot
+}
+
+// Slot yang menempati kotak (r, j): r=0 -> slot awal; r>0 -> penempatan manual kalau ada, kalau tidak pemenang match (r, j).
+const slotOf = (results, r, j) => (r === 0 ? j + 1 : (results.over?.get(`${r}:${j}`) ?? results.get(`${r}:${j}`) ?? null));
 
 // ---------------------------------------------------------------- data
 function loadState(guildId) {
   const names = Array(SIZE).fill(null);
   const teams = db.prepare('SELECT id, name, slot FROM bracket_teams WHERE guild_id=? ORDER BY id').all(guildId);
   for (const t of teams) if (t.slot) names[t.slot - 1] = t.name;
-  const results = new Map();
+  const results = new Results();
   for (const r of db.prepare('SELECT stage, idx, winner FROM bracket_results WHERE guild_id=?').all(guildId)) results.set(`${r.stage}:${r.idx}`, r.winner);
+  for (const r of db.prepare('SELECT stage, idx, slot FROM bracket_overrides WHERE guild_id=?').all(guildId)) results.over.set(`${r.stage}:${r.idx}`, r.slot);
   const picks = new Map();
   for (const r of db.prepare('SELECT stage, idx, map_name, killer_name FROM bracket_picks WHERE guild_id=?').all(guildId)) {
     picks.set(`${r.stage}:${r.idx}`, { map: r.map_name, killer: r.killer_name });
@@ -91,6 +105,25 @@ function pruneDownstream(guildId, results, r, j) {
   results.delete(key);
   db.prepare('DELETE FROM bracket_results WHERE guild_id=? AND stage=? AND idx=?').run(guildId, nr, nj);
   pruneDownstream(guildId, results, nr, nj);
+}
+
+// Setelah peserta berubah (edit manual), hapus semua hasil match yang pemenangnya tidak lagi ikut di match itu. Return daftar key yang dihapus.
+function revalidate(guildId, results) {
+  const removed = [];
+  for (let r = 1; r <= ROUNDS; r++) {
+    for (let j = 0; j < SIZE >> r; j++) {
+      const key = `${r}:${j}`;
+      const w = results.get(key);
+      if (w === undefined) continue;
+      const a = slotOf(results, r - 1, j * 2);
+      const b = slotOf(results, r - 1, j * 2 + 1);
+      if (w === a || w === b) continue;
+      results.delete(key);
+      db.prepare('DELETE FROM bracket_results WHERE guild_id=? AND stage=? AND idx=?').run(guildId, r, j);
+      removed.push(key);
+    }
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------- gambar bagan
@@ -246,6 +279,17 @@ function renderBracket({ title, prize, names, results, picks }) {
         ctx.stroke();
       }
 
+      // Kotak yang ditempatkan manual lewat /bracket edit: garis putus-putus oranye
+      if (name && r > 0 && r < ROUNDS && results.over?.has(`${r}:${j}`)) {
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#f39c12';
+        roundRect(ctx, x, cy - BH / 2, CW, BH, 8);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left';
       if (r === 0 && name) {
@@ -265,6 +309,14 @@ function renderBracket({ title, prize, names, results, picks }) {
         ctx.fillText(placeholder(r, j), x + (r === 0 ? 38 : 12), cy);
       }
     }
+  }
+
+  if (results.over?.size) {
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = '13px CardRegular';
+    ctx.fillStyle = '#f39c12';
+    ctx.fillText('- - -  posisi diatur manual oleh admin', X0, H - 16);
   }
 
   return canvas.toBuffer('image/png');
@@ -502,8 +554,162 @@ async function doSpinMk(i) {
   }
 }
 
+// ---------------------------------------------------------------- edit bagan yang sudah jadi (/bracket edit)
+const COL_NAME = ['16 Besar', 'Quarter Final', 'Semifinal', 'Grand Final']; // kolom bagan: peserta yang bermain di babak itu
+const norm = (s) => String(s || '').trim().toLowerCase();
+const matchShort = (key) => Object.values(MATCHES).find((m) => `${m.r}:${m.j}` === key)?.short || key;
+
+/** Cari tim di kolom `r` bagan (nama persis, atau sebagian nama kalau hanya satu yang cocok). */
+function findInColumn(st, r, input) {
+  const q = norm(input);
+  const found = [];
+  for (let j = 0; j < SIZE >> r; j++) {
+    const slot = slotOf(st.results, r, j);
+    const name = slot ? st.names[slot - 1] : null;
+    if (name) found.push({ j, slot, name });
+  }
+  const exact = found.filter((f) => f.name.toLowerCase() === q);
+  if (exact.length === 1) return exact[0];
+  const part = found.filter((f) => f.name.toLowerCase().includes(q));
+  return part.length === 1 ? part[0] : null;
+}
+
+/** Cari tim terdaftar berdasarkan nama (persis, atau sebagian nama kalau unik). */
+function findTeam(st, input, placedOnly) {
+  const q = norm(input);
+  const all = st.teams.filter((t) => !placedOnly || t.slot);
+  const exact = all.filter((t) => t.name.toLowerCase() === q);
+  if (exact.length === 1) return exact[0];
+  const part = all.filter((t) => t.name.toLowerCase().includes(q));
+  return part.length === 1 ? part[0] : null;
+}
+
+/** Tempatkan tim `slot` di kotak (r, j) kolom 1..3. Kalau sama dengan pemenang aslinya, penempatan manual dihapus. */
+function setBox(g, st, r, j, slot) {
+  const key = `${r}:${j}`;
+  if (slot === null || slot === st.results.get(key)) {
+    db.prepare('DELETE FROM bracket_overrides WHERE guild_id=? AND stage=? AND idx=?').run(g, r, j);
+    st.results.over.delete(key);
+  } else {
+    db.prepare(
+      `INSERT INTO bracket_overrides (guild_id, stage, idx, slot) VALUES (?, ?, ?, ?)
+       ON CONFLICT(guild_id, stage, idx) DO UPDATE SET slot=excluded.slot`
+    ).run(g, r, j, slot);
+    st.results.over.set(key, slot);
+  }
+}
+
+// Tukar dua tim di kolom awal (slot). Hasil match & penempatan manual ikut pindah bersama timnya.
+const swapSlots = db.transaction((g, sa, sb) => {
+  const ta = db.prepare('SELECT id FROM bracket_teams WHERE guild_id=? AND slot=?').get(g, sa);
+  const tb = db.prepare('SELECT id FROM bracket_teams WHERE guild_id=? AND slot=?').get(g, sb);
+  db.prepare('UPDATE bracket_teams SET slot=NULL WHERE id=?').run(ta.id);
+  db.prepare('UPDATE bracket_teams SET slot=? WHERE id=?').run(sa, tb.id);
+  db.prepare('UPDATE bracket_teams SET slot=? WHERE id=?').run(sb, ta.id);
+  db.prepare('UPDATE bracket_results SET winner = CASE winner WHEN ? THEN ? WHEN ? THEN ? ELSE winner END WHERE guild_id=?').run(sa, sb, sb, sa, g);
+  db.prepare('UPDATE bracket_overrides SET slot = CASE slot WHEN ? THEN ? WHEN ? THEN ? ELSE slot END WHERE guild_id=?').run(sa, sb, sb, sa, g);
+});
+
+async function sendEdited(i, g, text) {
+  const st = loadState(g);
+  const removed = revalidate(g, st.results);
+  let msg = text;
+  if (removed.length) msg += `\n⚠️ Hasil ini ikut dibatalkan karena pesertanya berubah: **${removed.map(matchShort).join(', ')}**. Isi lagi dengan \`/bracket hasil\`.`;
+  return i.editReply({ content: msg.slice(0, 1900), files: [bracketAttachment(st)], allowedMentions: NO_PING });
+}
+
+async function doEdit(i, sub) {
+  const g = i.guildId;
+  if (spinning.has(g)) return i.reply({ content: '⏳ Roda masih berputar, tunggu sebentar.', flags: EPHEMERAL });
+  const st = loadState(g);
+  const fail = (content) => i.reply({ content, flags: EPHEMERAL, allowedMentions: NO_PING });
+
+  // ---- tukar dua tim dalam satu kolom
+  if (sub === 'tukar') {
+    const r = i.options.getInteger('babak', true);
+    const A = findInColumn(st, r, i.options.getString('tim1', true));
+    const B = findInColumn(st, r, i.options.getString('tim2', true));
+    if (!A || !B) return fail(`❌ Tim tidak ditemukan di kolom **${COL_NAME[r]}** (nama harus persis, atau bagian nama yang unik). Cek dengan \`/bracket tampil\`.`);
+    if (A.slot === B.slot) return fail('❌ Pilih dua tim yang berbeda.');
+    await i.deferReply();
+    if (r === 0) {
+      swapSlots(g, A.slot, B.slot);
+    } else {
+      setBox(g, st, r, A.j, B.slot);
+      setBox(g, st, r, B.j, A.slot);
+    }
+    return sendEdited(i, g, `🔄 **${A.name}** ⇄ **${B.name}** ditukar di kolom **${COL_NAME[r]}**.`);
+  }
+
+  // ---- taruh tim di posisi tertentu
+  if (sub === 'isi') {
+    const r = i.options.getInteger('babak', true);
+    const pos = i.options.getInteger('posisi', true);
+    const j = pos - 1;
+    if (j < 0 || j >= SIZE >> r) return fail(`❌ Kolom **${COL_NAME[r]}** hanya punya posisi 1–${SIZE >> r} (dari atas).`);
+    const team = findTeam(st, i.options.getString('tim', true), true);
+    if (!team) return fail('❌ Tim tidak ditemukan (atau namanya ambigu / belum diundi ke slot). Cek `/bracket daftar`.');
+    for (let k = 0; k < SIZE >> r; k++) {
+      if (k !== j && slotOf(st.results, r, k) === team.slot) {
+        return fail(`❌ **${team.name}** sudah ada di posisi ${k + 1} kolom ${COL_NAME[r]}. Pakai \`/bracket edit tukar\` untuk menukar posisi.`);
+      }
+    }
+    await i.deferReply();
+    setBox(g, st, r, j, team.slot);
+    return sendEdited(i, g, `✏️ **${team.name}** ditempatkan di posisi **${pos}** kolom **${COL_NAME[r]}**.`);
+  }
+
+  // ---- kembalikan penempatan manual
+  if (sub === 'pulihkan') {
+    const r = i.options.getInteger('babak');
+    const q = r === null ? db.prepare('DELETE FROM bracket_overrides WHERE guild_id=?').run(g) : db.prepare('DELETE FROM bracket_overrides WHERE guild_id=? AND stage=?').run(g, r);
+    if (!q.changes) return fail('Tidak ada posisi manual yang perlu dipulihkan.');
+    await i.deferReply();
+    return sendEdited(i, g, `♻️ Posisi manual ${r === null ? 'di semua kolom' : `kolom **${COL_NAME[r]}**`} dikembalikan ke hasil match (${q.changes} posisi).`);
+  }
+
+  // ---- map & killer manual
+  if (sub === 'mapkiller') {
+    const key = i.options.getString('match', true);
+    const m = MATCHES[key];
+    const mapIn = i.options.getString('map')?.trim();
+    const killerIn = i.options.getString('killer')?.trim();
+    if (!mapIn && !killerIn) return fail('❌ Isi minimal salah satu: `map` atau `killer`.');
+    const cur = st.picks.get(`${m.r}:${m.j}`);
+    const mp = (mapIn || cur?.map || '').slice(0, 40);
+    const kl = (killerIn || cur?.killer || '').slice(0, 40);
+    if (!mp || !kl) return fail(`❌ **${m.short}** belum punya map & killer, jadi isi dua-duanya.`);
+    await i.deferReply();
+    savePick(g, m, mp, kl);
+    st.picks.set(`${m.r}:${m.j}`, { map: mp, killer: kl });
+    return i.editReply({ content: `🗺️ **${m.label}** diubah manual:\n${matchLine(st, key)}`, files: [bracketAttachment(st)], allowedMentions: NO_PING });
+  }
+
+  // ---- ganti nama tim
+  if (sub === 'nama') {
+    const team = findTeam(st, i.options.getString('lama', true), false);
+    const baru = i.options.getString('baru', true).trim();
+    if (!team) return fail('❌ Tim tidak ditemukan (atau namanya ambigu). Cek `/bracket daftar`.');
+    if (!baru || baru.length > 40) return fail('❌ Nama baru harus 1–40 karakter.');
+    try {
+      db.prepare('UPDATE bracket_teams SET name=? WHERE id=?').run(baru, team.id);
+    } catch {
+      return fail('❌ Nama itu sudah dipakai tim lain.');
+    }
+    await i.deferReply();
+    return sendEdited(i, g, `📝 **${team.name}** diganti menjadi **${baru}**.`);
+  }
+}
+
 // ---------------------------------------------------------------- /bracket
 const matchChoices = Object.entries(MATCHES).map(([value, m]) => ({ name: m.label, value }));
+// Kolom bagan = peserta yang bermain di babak itu (0 = kolom awal 16 tim)
+const columnChoices = [
+  { name: '16 Besar (kolom awal)', value: 0 },
+  { name: 'Quarter Final', value: 1 },
+  { name: 'Semifinal', value: 2 },
+  { name: 'Grand Final', value: 3 },
+];
 
 const command = {
   data: new SlashCommandBuilder()
@@ -560,11 +766,58 @@ const command = {
               { name: 'Semuanya (tim, undian, hasil)', value: 'semua' }
             )
         )
+    )
+    .addSubcommandGroup((grp) =>
+      grp
+        .setName('edit')
+        .setDescription('Edit bagan yang sudah jadi (admin)')
+        .addSubcommand((s) =>
+          s
+            .setName('tukar')
+            .setDescription('Tukar posisi dua tim di satu kolom bagan (mis. paksa dua tim bertemu)')
+            .addIntegerOption((o) => o.setName('babak').setDescription('Kolom bagan tempat dua tim ini berada').setRequired(true).addChoices(...columnChoices))
+            .addStringOption((o) => o.setName('tim1').setDescription('Tim pertama (nama / sebagian nama)').setRequired(true).setMaxLength(40))
+            .addStringOption((o) => o.setName('tim2').setDescription('Tim kedua (nama / sebagian nama)').setRequired(true).setMaxLength(40))
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('isi')
+            .setDescription('Taruh sebuah tim di posisi tertentu pada kolom QF / SF / Final')
+            .addIntegerOption((o) => o.setName('babak').setDescription('Kolom bagan').setRequired(true).addChoices(...columnChoices.slice(1)))
+            .addIntegerOption((o) => o.setName('posisi').setDescription('Posisi dari atas (1-2 = match pertama, 3-4 = match kedua, dst)').setRequired(true).setMinValue(1).setMaxValue(8))
+            .addStringOption((o) => o.setName('tim').setDescription('Tim yang ditempatkan (nama / sebagian nama)').setRequired(true).setMaxLength(40))
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('pulihkan')
+            .setDescription('Batalkan posisi manual, kembali sesuai hasil match')
+            .addIntegerOption((o) => o.setName('babak').setDescription('Kolom tertentu (kosong = semua)').addChoices(...columnChoices.slice(1)))
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('mapkiller')
+            .setDescription('Atur map / killer sebuah match secara manual (tanpa spin)')
+            .addStringOption((o) => o.setName('match').setDescription('Match yang diubah').setRequired(true).addChoices(...matchChoices))
+            .addStringOption((o) => o.setName('map').setDescription('Nama map (kosong = tetap)').setMaxLength(40))
+            .addStringOption((o) => o.setName('killer').setDescription('Nama killer (kosong = tetap)').setMaxLength(40))
+        )
+        .addSubcommand((s) =>
+          s
+            .setName('nama')
+            .setDescription('Ganti nama tim (mis. typo / nama terpotong)')
+            .addStringOption((o) => o.setName('lama').setDescription('Nama tim sekarang').setRequired(true).setMaxLength(40))
+            .addStringOption((o) => o.setName('baru').setDescription('Nama baru').setRequired(true).setMaxLength(40))
+        )
     ),
 
   async execute(i) {
     const sub = i.options.getSubcommand();
     const g = i.guildId;
+
+    if (i.options.getSubcommandGroup(false) === 'edit') {
+      if (!isAdmin(i)) return adminOnly(i);
+      return doEdit(i, sub);
+    }
 
     if (sub === 'tampil') {
       await i.deferReply();
@@ -704,7 +957,10 @@ const command = {
     if (sub === 'reset') {
       const part = i.options.getString('bagian', true);
       if (spinning.has(g)) return i.reply({ content: '⏳ Roda masih berputar, tunggu sebentar.', flags: EPHEMERAL });
-      if (part !== 'mapkiller') db.prepare('DELETE FROM bracket_results WHERE guild_id=?').run(g);
+      if (part !== 'mapkiller') {
+        db.prepare('DELETE FROM bracket_results WHERE guild_id=?').run(g);
+        db.prepare('DELETE FROM bracket_overrides WHERE guild_id=?').run(g); // posisi manual ikut direset
+      }
       if (part === 'undian') db.prepare('UPDATE bracket_teams SET slot=NULL WHERE guild_id=?').run(g);
       if (part === 'mapkiller' || part === 'semua') db.prepare('DELETE FROM bracket_picks WHERE guild_id=?').run(g);
       if (part === 'semua') db.prepare('DELETE FROM bracket_teams WHERE guild_id=?').run(g);
