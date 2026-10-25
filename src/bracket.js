@@ -2,7 +2,7 @@
 // Alur: /bracket tambah (tim) -> /bracket spin | spinall (undi slot) -> /bracket spinmk (map & killer tiap match, 16 besar s.d. final)
 //       -> /bracket hasil (isi pemenang) -> /bracket tampil | jadwal
 // Bagan yang sudah jadi bisa diedit lewat /bracket edit (tukar posisi tim, isi posisi, map & killer manual, ganti nama tim).
-// Bagan digambar sebagai gambar PNG (canvas). Roda undian: GIF berputar dulu, lalu diganti kartu hasil (lihat wheel.js).
+// Bagan digambar sebagai gambar PNG (canvas). Roda undian: GIF berputar dulu, lalu diganti kartu hasil (lihat wheel.js)
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { createCanvas } = require('@napi-rs/canvas');
 const { randomInt } = require('crypto');
